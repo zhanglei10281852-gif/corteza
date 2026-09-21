@@ -3,7 +3,6 @@ package dal
 import (
 	"context"
 	"fmt"
-	"io"
 	"strings"
 
 	"github.com/cortezaproject/corteza/server/pkg/filter"
@@ -42,6 +41,10 @@ type (
 		//       to pull everything.
 		outSorted *btree.Generic[ValueGetter]
 		i         int
+
+		// closed makes Close idempotent: a run tears the resource tree down
+		// exactly once even when Close is invoked more than once.
+		closed bool
 	}
 )
 
@@ -115,26 +118,18 @@ func (xs *joinLeft) Scan(s ValueSetter) (err error) {
 	return
 }
 
-func (xs *joinLeft) Close() (err error) {
-	if xs == nil {
-		return
+// Close releases both source iterators.
+//
+// Close is idempotent and always attempts to close every child even when one
+// of them fails, so a single broken source can not leak the other database
+// connection. All close errors are aggregated in stable (left, right) order.
+func (xs *joinLeft) Close() error {
+	if xs == nil || xs.closed {
+		return nil
 	}
+	xs.closed = true
 
-	cc := []io.Closer{
-		xs.leftSource,
-		xs.rightSource,
-	}
-
-	for _, c := range cc {
-		if c != nil {
-			err = c.Close()
-			if err != nil {
-				return err
-			}
-		}
-	}
-
-	return
+	return closeIterators(xs.leftSource, xs.rightSource)
 }
 
 func (xs *joinLeft) BackCursor(v ValueGetter) (pc *filter.PagingCursor, err error) {

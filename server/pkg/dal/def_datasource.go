@@ -144,20 +144,64 @@ func (def *Datasource) init(ctx context.Context) (err error) {
 			return err
 		}
 
-		def.auxIter, err = def.connection.connection.Aggregate(ctx, def.model, f, wa.groupDefs, wa.aggregateDefs, having)
+		var it Iterator
+		it, err = def.connection.connection.Aggregate(ctx, def.model, f, wa.groupDefs, wa.aggregateDefs, having)
+		return def.adoptAuxIter(it, err)
+	}
+
+	var it Iterator
+	it, err = def.connection.connection.Search(ctx, def.model, def.filter)
+	return def.adoptAuxIter(it, err)
+}
+
+// adoptAuxIter adopts the iterator produced by the underlying connection
+//
+// The iterator is only adopted when initialization succeeded. When the
+// connection returns an error together with an iterator, the iterator is
+// closed immediately so a failed datasource initialization never leaves an
+// active database connection behind.
+func (def *Datasource) adoptAuxIter(it Iterator, err error) error {
+	if err != nil {
+		if it != nil {
+			_ = it.Close()
+		}
+		def.auxIter = nil
 		return err
 	}
 
-	def.auxIter, err = def.connection.connection.Search(ctx, def.model, def.filter)
-	return err
+	def.auxIter = it
+	return nil
 }
 
+// exec returns the initialized iterator and transfers its ownership to the
+// caller.
+//
+// The iterator is detached from the (potentially shared) step definition so
+// subsequent runs always open a fresh resource and can never reuse or
+// double-close an iterator that was already handed out and closed.
 func (def *Datasource) exec(ctx context.Context) (out Iterator, err error) {
 	if def.auxIter == nil {
 		return nil, fmt.Errorf("datasource not initialized")
 	}
 
-	return def.auxIter, nil
+	out = def.auxIter
+	def.auxIter = nil
+	return out, nil
+}
+
+// discardAuxIter releases the iterator opened by init without handing it out.
+//
+// Dryrun only needs the initialization/validation side effects of the
+// datasource; the opened iterator belongs to no run so it is released right
+// away instead of being left active on the step definition.
+func (def *Datasource) discardAuxIter() error {
+	if def.auxIter == nil {
+		return nil
+	}
+
+	err := def.auxIter.Close()
+	def.auxIter = nil
+	return err
 }
 
 func (def *Datasource) validate() (err error) {

@@ -540,7 +540,17 @@ func (svc *service) Dryrun(ctx context.Context, pp Pipeline) (err error) {
 	return
 }
 
-// run is the recursive counterpart to run
+// run is the recursive counterpart for Run
+//
+// A single pipeline run owns one complete resource tree. Every iterator that
+// initializes successfully (a datasource, a branch or a wrapper) is
+// immediately part of the current build scope: if a subsequent step fails to
+// initialize, every previously opened iterator is closed along the tree so no
+// database connection is leaked.
+//
+// When the tree is handed to the caller (Run), the caller owns it and releases
+// it by closing the root iterator; closing any node of the tree releases the
+// whole subtree beneath it.
 func (svc *service) run(ctx context.Context, s PipelineStep, dry bool) (it Iterator, err error) {
 	switch s := s.(type) {
 	case *Datasource:
@@ -549,12 +559,15 @@ func (svc *service) run(ctx context.Context, s PipelineStep, dry bool) (it Itera
 			return
 		}
 		if dry {
-			return nil, nil
+			// Dryrun only needs the init/validation side effects; no iterator
+			// is handed out so release the opened resource right away.
+			return nil, s.discardAuxIter()
 		}
 		return s.exec(ctx)
 
 	case *Aggregate:
-		it, err = svc.run(ctx, s.rel, dry)
+		var src Iterator
+		src, err = svc.run(ctx, s.rel, dry)
 		if err != nil {
 			return
 		}
@@ -562,41 +575,80 @@ func (svc *service) run(ctx context.Context, s PipelineStep, dry bool) (it Itera
 		if dry {
 			return nil, s.dryrun(ctx)
 		}
-		return s.iterator(ctx, it)
+
+		it, err = s.iterator(ctx, src)
+		if err != nil {
+			// Wrapper initialization failed; roll back the source subtree.
+			// When the (partially constructed) wrapper is returned, it already
+			// owns the source -- close it instead of the source directly.
+			if it != nil {
+				_ = it.Close()
+			} else {
+				_ = closeIterators(src)
+			}
+			return nil, err
+		}
+		return it, nil
 
 	case *Join:
-		var left Iterator
-		var right Iterator
+		var left, right Iterator
 		left, err = svc.run(ctx, s.relLeft, dry)
 		if err != nil {
 			return
 		}
 		right, err = svc.run(ctx, s.relRight, dry)
 		if err != nil {
-			return
+			// Right branch failed: release the already opened left branch.
+			_ = closeIterators(left)
+			return nil, err
 		}
 
 		if dry {
 			return nil, s.dryrun(ctx)
 		}
-		return s.iterator(ctx, left, right)
+
+		it, err = s.iterator(ctx, left, right)
+		if err != nil {
+			// Combiner creation failed: release all previously opened branches.
+			// A partially constructed combiner already owns both branches.
+			if it != nil {
+				_ = it.Close()
+			} else {
+				_ = closeIterators(left, right)
+			}
+			return nil, err
+		}
+		return it, nil
 
 	case *Link:
-		var left Iterator
-		var right Iterator
+		var left, right Iterator
 		left, err = svc.run(ctx, s.relLeft, dry)
 		if err != nil {
 			return
 		}
 		right, err = svc.run(ctx, s.relRight, dry)
 		if err != nil {
-			return
+			// Right branch failed: release the already opened left branch.
+			_ = closeIterators(left)
+			return nil, err
 		}
 
 		if dry {
 			return nil, s.dryrun(ctx)
 		}
-		return s.iterator(ctx, left, right)
+
+		it, err = s.iterator(ctx, left, right)
+		if err != nil {
+			// Combiner creation failed: release all previously opened branches.
+			// A partially constructed combiner already owns both branches.
+			if it != nil {
+				_ = it.Close()
+			} else {
+				_ = closeIterators(left, right)
+			}
+			return nil, err
+		}
+		return it, nil
 	}
 
 	return nil, fmt.Errorf("unsupported step")

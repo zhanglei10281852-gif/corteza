@@ -360,7 +360,18 @@ func (svc *report) Run(ctx context.Context, reportID uint64, dd reporting.FrameD
 				if err != nil {
 					return
 				}
-				defer iter.Close()
+
+				// Always release the pipeline's resource tree -- whether the
+				// frames are consumed fully, the context is canceled, scanning
+				// fails or frame generation/enhancement fails.
+				//
+				// The primary execution error takes precedence; close errors
+				// are returned only when the main flow succeeded.
+				defer func() {
+					if closeErr := iter.Close(); closeErr != nil && err == nil {
+						err = closeErr
+					}
+				}()
 
 				ff, err = reporting.Frames(ctx, iter, run)
 				if err != nil {

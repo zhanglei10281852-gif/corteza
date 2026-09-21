@@ -35,6 +35,10 @@ type (
 		i          int
 
 		ctr int
+
+		// closed makes Close idempotent: a run tears the resource tree down
+		// exactly once even when Close is invoked more than once.
+		closed bool
 	}
 
 	keyWalker func(context.Context, ValueGetter, func(context.Context, groupKey, ValueGetter) error) error
@@ -185,11 +189,17 @@ func (s *aggregate) Scan(dst ValueSetter) (err error) {
 	return nil
 }
 
+// Close releases the wrapped source iterator.
+//
+// Close is idempotent so a run can tear the resource tree down exactly once
+// even when the same node gets closed more than once.
 func (s *aggregate) Close() error {
-	if s.source != nil {
-		return s.source.Close()
+	if s == nil || s.closed {
+		return nil
 	}
-	return nil
+	s.closed = true
+
+	return closeIterators(s.source)
 }
 
 func (s *aggregate) BackCursor(v ValueGetter) (*filter.PagingCursor, error) {

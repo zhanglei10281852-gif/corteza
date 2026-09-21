@@ -341,6 +341,14 @@ func (svc record) Report(ctx context.Context, namespaceID, moduleID uint64, metr
 		reportItems = make([]recordReportEntry, 0, 16)
 	)
 
+	// Last-resort teardown if the main flow is interrupted before reaching the
+	// explicit close below; the explicit close nils the iterator when done.
+	defer func() {
+		if iter != nil {
+			_ = iter.Close()
+		}
+	}()
+
 	err = func() error {
 		if ns, m, err = loadModuleCombo(ctx, svc.store, namespaceID, moduleID); err != nil {
 			return err
@@ -364,8 +372,6 @@ func (svc record) Report(ctx context.Context, namespaceID, moduleID uint64, metr
 			return err
 		}
 
-		defer iter.Close()
-
 		for iter.Next(ctx) {
 			item := recordReportEntry{}
 			err = iter.Scan(item)
@@ -378,6 +384,19 @@ func (svc record) Report(ctx context.Context, namespaceID, moduleID uint64, metr
 		}
 		return iter.Err()
 	}()
+
+	// Release the pipeline's resource tree regardless of how the run ended --
+	// full consumption, canceled context or scan failure all reach this point.
+	//
+	// The primary execution error takes precedence; close errors are surfaced
+	// only when the main flow succeeded. Closing happens before the action is
+	// recorded so a failed teardown is part of the action's outcome.
+	if iter != nil {
+		if closeErr := iter.Close(); closeErr != nil && err == nil {
+			err = closeErr
+		}
+		iter = nil
+	}
 
 	return reportItems, svc.recordAction(ctx, aProps, RecordActionReport, err)
 }

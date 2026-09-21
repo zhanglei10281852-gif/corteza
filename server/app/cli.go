@@ -15,6 +15,7 @@ import (
 	"github.com/cortezaproject/corteza/server/pkg/dal"
 	"github.com/cortezaproject/corteza/server/pkg/envoyx"
 	"github.com/cortezaproject/corteza/server/pkg/id"
+	"github.com/cortezaproject/corteza/server/pkg/messagebus"
 	"github.com/cortezaproject/corteza/server/pkg/options"
 	"github.com/cortezaproject/corteza/server/store"
 	systemCommands "github.com/cortezaproject/corteza/server/system/commands"
@@ -98,6 +99,13 @@ func (app *CortezaApp) InitCLI() {
 		wg.Wait()
 
 		app.HttpServer.Shutdown()
+
+		// gracefully retire active queue generations: stop accepting new
+		// messages, cancel in-flight handoff and wait for dispatcher
+		// goroutines to finish so none are left behind
+		if mb := messagebus.Service(); mb != nil {
+			mb.Close()
+		}
 
 		return nil
 	})

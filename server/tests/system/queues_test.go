@@ -113,8 +113,11 @@ func TestQueueUpdate(t *testing.T) {
 	h := newHelper(t)
 	h.clearMessagebusQueues()
 
-	consumer := string(mtypes.ConsumerRedis)
-	res := h.repoMakeMessagebusQueue()
+	// use an implemented consumer so the persisted change is also applied
+	// to the running messagebus (unimplemented handlers would make the
+	// operation return a retryable "not applied" error)
+	consumer := string(mtypes.ConsumerStore)
+	res := h.repoMakeMessagebusQueue(string(mtypes.ConsumerEventbus))
 	res.Consumer = consumer
 
 	helpers.AllowMe(h, types.QueueRbacResource(0), "update")
@@ -158,7 +161,10 @@ func TestQueueUnDelete(t *testing.T) {
 	h := newHelper(t)
 	h.clearMessagebusQueues()
 
-	res := h.repoMakeMessagebusQueue()
+	// use an implemented consumer so the persisted change is also applied
+	// to the running messagebus (unimplemented handlers would make the
+	// operation return a retryable "not applied" error)
+	res := h.repoMakeMessagebusQueue(string(mtypes.ConsumerStore))
 
 	helpers.AllowMe(h, types.QueueRbacResource(0), "delete")
 
@@ -173,4 +179,34 @@ func TestQueueUnDelete(t *testing.T) {
 	res = h.lookupByID(res.ID)
 	h.a.NotNil(res)
 	h.a.Nil(res.DeletedAt)
+}
+
+// TestQueueCreateReloadNotApplied covers online changes that cannot be
+// applied at runtime: the queue is persisted but consumer initialization
+// fails, so the operation returns a diagnosable error while the previous
+// runtime generation stays in service
+func TestQueueCreateReloadNotApplied(t *testing.T) {
+	h := newHelper(t)
+	h.clearMessagebusQueues()
+
+	helpers.AllowMe(h, types.ComponentRbacResource(), "queue.create")
+
+	// redis consumer is a valid handler but not implemented in runtime
+	queue := rs()
+	consumer := string(mtypes.ConsumerRedis)
+
+	h.apiInit().
+		Post("/queues").
+		Header("Accept", "application/json").
+		FormData("consumer", consumer).
+		FormData("queue", queue).
+		Expect(t).
+		Status(http.StatusOK).
+		Assert(helpers.AssertError("queue.errors.reloadNotApplied")).
+		End()
+
+	// the change is persisted even though it was not applied at runtime
+	res := h.lookupByQueue(queue)
+	h.a.NotNil(res)
+	h.a.Equal(consumer, res.Consumer)
 }

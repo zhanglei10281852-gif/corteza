@@ -11,3 +11,4 @@ errors:
   notAllowedToUpdate: not allowed to update this queue
   notAllowedToWriteTo: not allowed to add messages to this queue
   notFound: queue not found
+  reloadNotApplied: queue configuration was saved but could not be applied to the running message bus; the previous configuration is still active, please retry

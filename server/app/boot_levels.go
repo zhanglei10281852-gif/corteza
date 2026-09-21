@@ -390,8 +390,14 @@ func (app *CortezaApp) InitServices(ctx context.Context) (err error) {
 	}
 
 	if app.Opt.Messagebus.Enabled {
-		// initialize all the queue handlers
-		messagebus.Service().Init(ctx, service.DefaultQueue)
+		// initialize all the queue handlers and activate the first
+		// queue generation; when the configuration can not be loaded
+		// the messagebus starts without an active generation and
+		// retries on the next queue change
+		if err = messagebus.Service().Init(ctx, service.DefaultQueue); err != nil {
+			app.Log.Warn("could not initialize messagebus queues", zap.Error(err))
+			err = nil
+		}
 	}
 
 	// Initializes automation services
@@ -571,18 +577,13 @@ func (app *CortezaApp) Activate(ctx context.Context) (err error) {
 	updateSassInstallSettings(ctx, sysService.DefaultStylesheet.SassInstalled(), app.Log)
 	//Generate CSS for webapps
 	if err = sysService.DefaultStylesheet.GenerateCSS(sysService.CurrentSettings, app.Opt.Webapp.ScssDirPath, app.Log); err != nil {
-		return fmt.Errorf("could not generate css for webapps: %w", err)
+		return fmt.Errorf("could not generate CSS for webapps: %w", err)
 	}
 
-	// messagebus reloader and consumer listeners
-	if app.Opt.Messagebus.Enabled {
-
-		// set messagebus listener on input channel
-		messagebus.Service().Listen(ctx)
-
-		// watch for queue changes and restart on update
-		messagebus.Service().Watch(ctx, service.DefaultQueue)
-	}
+	// queue configuration is applied synchronously on every queue
+	// management operation (create/update/delete/undelete), and each
+	// generation runs its own dispatcher, so no global listener or
+	// reload watcher is needed here
 
 	{
 		if err = applyApigwOptionsToSettings(ctx, app.Log, app.Opt.Apigw, sysService.CurrentSettings); err != nil {

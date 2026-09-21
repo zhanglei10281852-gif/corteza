@@ -129,11 +129,10 @@ func (h helper) checkPersistedMessages(ctx context.Context, f sysTypes.QueueMess
 }
 
 func (h helper) initMessagebus(ctx context.Context) {
-	// re-init
-	messagebus.Service().Init(ctx, service.DefaultQueue)
-
-	// set messagebus watchers again
-	messagebus.Service().Listen(ctx)
+	// re-init: load persisted queues and activate a fresh generation;
+	// the generation starts its own dispatcher, so there is no separate
+	// Listen call anymore
+	h.noError(messagebus.Service().Init(ctx, service.DefaultQueue))
 }
 
 func makeDelay(d time.Duration) *time.Duration {

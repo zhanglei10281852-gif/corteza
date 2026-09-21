@@ -7,6 +7,7 @@ import (
 
 	"github.com/cortezaproject/corteza/server/pkg/actionlog"
 	"github.com/cortezaproject/corteza/server/pkg/eventbus"
+	"github.com/cortezaproject/corteza/server/pkg/locale"
 	"github.com/cortezaproject/corteza/server/pkg/messagebus"
 	mt "github.com/cortezaproject/corteza/server/pkg/messagebus/types"
 	"github.com/cortezaproject/corteza/server/store"
@@ -142,8 +143,12 @@ func (svc *queue) Create(ctx context.Context, new *types.Queue) (q *types.Queue,
 
 		q = new
 
-		// send the signal to reload all queues
-		messagebus.Service().ReloadQueues()
+		// apply the persisted queue configuration to the running messagebus;
+		// when the generation switch fails the previous configuration keeps
+		// serving traffic and a diagnosable, retryable error is returned
+		if err = applyQueueReload(ctx, qProps); err != nil {
+			return
+		}
 
 		return nil
 	}()
@@ -191,8 +196,12 @@ func (svc *queue) Update(ctx context.Context, upd *types.Queue) (q *types.Queue,
 
 		q = upd
 
-		// send the signal to reload all queues
-		messagebus.Service().ReloadQueues()
+		// apply the persisted queue configuration to the running messagebus;
+		// when the generation switch fails the previous configuration keeps
+		// serving traffic and a diagnosable, retryable error is returned
+		if err = applyQueueReload(ctx, qProps); err != nil {
+			return
+		}
 
 		return nil
 	}()
@@ -222,8 +231,12 @@ func (svc *queue) DeleteByID(ctx context.Context, ID uint64) (err error) {
 			return
 		}
 
-		// send the signal to reload all queues
-		messagebus.Service().ReloadQueues()
+		// apply the persisted queue configuration to the running messagebus;
+		// when the generation switch fails the previous configuration keeps
+		// serving traffic and a diagnosable, retryable error is returned
+		if err = applyQueueReload(ctx, qProps); err != nil {
+			return
+		}
 
 		return nil
 	}()
@@ -253,8 +266,12 @@ func (svc *queue) UndeleteByID(ctx context.Context, ID uint64) (err error) {
 			return
 		}
 
-		// send the signal to reload all queues
-		messagebus.Service().ReloadQueues()
+		// apply the persisted queue configuration to the running messagebus;
+		// when the generation switch fails the previous configuration keeps
+		// serving traffic and a diagnosable, retryable error is returned
+		if err = applyQueueReload(ctx, qProps); err != nil {
+			return
+		}
 
 		return nil
 	}()
@@ -310,4 +327,53 @@ func (svc *queue) isValidHandler(h mt.ConsumerType) bool {
 		}
 	}
 	return false
+}
+
+// applyQueueReload synchronously hands the persisted queue configuration over
+// to a new running generation.
+//
+// The database change is already committed at this point: when the running
+// configuration can not be switched (query or consumer initialization
+// failure), the previous generation keeps serving and a diagnosable,
+// retryable error is returned for the management operation.
+func applyQueueReload(ctx context.Context, props *queueActionProps) error {
+	if messagebus.Service() == nil {
+		return nil
+	}
+
+	if err := messagebus.Service().ReloadQueues(ctx); err != nil {
+		return QueueErrReloadNotApplied(props).Wrap(err)
+	}
+
+	return nil
+}
+
+// QueueErrReloadNotApplied is returned when queue configuration was persisted
+// but could not be applied to the running messagebus.
+//
+// The previous generation remains in service and repeating the save (or any
+// queue change) retries the handoff without any data loss.
+func QueueErrReloadNotApplied(props *queueActionProps) *errors.Error {
+	if props == nil {
+		props = &queueActionProps{}
+	}
+
+	return errors.New(
+		errors.KindInternal,
+
+		props.Format("queue configuration saved but not applied to the running message bus; the previous configuration is still active, please retry", nil),
+
+		errors.Meta("type", "reloadNotApplied"),
+		errors.Meta("retryable", true),
+		errors.Meta("resource", "system:queue"),
+
+		errors.Meta(queueLogMetaKey{}, "saved queue configuration could not be applied to the running messagebus: {err}"),
+		errors.Meta(queuePropsMetaKey{}, props),
+
+		// translation namespace & key
+		errors.Meta(locale.ErrorMetaNamespace{}, "system"),
+		errors.Meta(locale.ErrorMetaKey{}, "queue.errors.reloadNotApplied"),
+
+		errors.StackSkip(1),
+	)
 }

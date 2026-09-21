@@ -342,7 +342,9 @@ func (h *AuthHandlers) handleTokenRequest(req *request.AuthReq, client *types.Au
 		w   = req.Response
 		ctx = req.Context()
 
-		user *types.User
+		user    *types.User
+		signed  []byte
+		idToken []byte
 	)
 
 	req.Status = -1
@@ -366,87 +368,98 @@ func (h *AuthHandlers) handleTokenRequest(req *request.AuthReq, client *types.Au
 		)
 	}
 
-	ti, err := h.OAuth2.GetAccessToken(ctx, gt, tgr)
-	if err != nil {
-		return h.tokenError(w, err)
-	}
+	var ti oauth2def.TokenInfo
 
-	suCtx := auth.SetIdentityToContext(ctx, auth.ServiceUser())
-
-	switch gt {
-	case oauth2def.ClientCredentials:
-		// Authenticated with client credentials!
-
-		// First, validate client's security settings
-		if client.Security == nil || client.Security.ImpersonateUser == 0 {
-			return h.tokenError(w, errors.Internal("auth client security configuration invalid"))
+	if gt == oauth2def.AuthorizationCode {
+		// Hardened, database-enforced single-use authorization-code exchange.
+		//
+		// User validation, JWT signing and OIDC id_token generation complete
+		// before the code is claimed, and code retirement + token row commit
+		// atomically; failures neither orphan tokens nor consume the code.
+		ti, user, signed, idToken, err = h.exchangeAuthorizationCode(req, client, tgr)
+		if err != nil {
+			return h.tokenError(w, err)
+		}
+	} else {
+		ti, err = h.OAuth2.GetAccessToken(ctx, gt, tgr)
+		if err != nil {
+			return h.tokenError(w, err)
 		}
 
-		// Load the user
-		if user, err = h.UserService.FindByAny(suCtx, client.Security.ImpersonateUser); err != nil {
-			return h.tokenError(w, fmt.Errorf("could not generate token for impersonated user: %v", err))
+		suCtx := auth.SetIdentityToContext(ctx, auth.ServiceUser())
+
+		switch gt {
+		case oauth2def.ClientCredentials:
+			// Authenticated with client credentials!
+
+			// First, validate client's security settings
+			if client.Security == nil || client.Security.ImpersonateUser == 0 {
+				return h.tokenError(w, errors.Internal("auth client security configuration invalid"))
+			}
+
+			// Load the user
+			if user, err = h.UserService.FindByAny(suCtx, client.Security.ImpersonateUser); err != nil {
+				return h.tokenError(w, fmt.Errorf("could not generate token for impersonated user: %v", err))
+			}
+
+		case oauth2def.Refreshing:
+			userID := ti.GetUserID()
+			if i := strings.Index(ti.GetUserID(), " "); i > 0 {
+				// userID field from the token could contain encoded roles
+				// @todo investigate if role-encoding into user-id field is still needed?
+				userID = userID[:i]
+			}
+
+			sessionUserExists := req.AuthUser != nil && req.AuthUser.User != nil
+
+			user, err = h.UserService.FindByAny(suCtx, userID)
+
+			if err != nil {
+				if !errors.Is(err, systemService.UserErrNotFound()) {
+					return h.tokenError(w, fmt.Errorf("could not generate token: %v", err))
+				}
+
+				if errors.Is(err, systemService.UserErrNotFound()) && sessionUserExists {
+					user = req.AuthUser.User
+				}
+			}
+
+			if sessionUserExists && req.AuthUser.User.ID == cast.ToUint64(userID) {
+				req.AuthUser.User = user
+				req.AuthUser.Save(req.Session)
+			}
+
+		default:
+			return fmt.Errorf("unsupported oauth2 grant type: %v", gt)
 		}
 
-	case oauth2def.AuthorizationCode, oauth2def.Refreshing:
-		userID := ti.GetUserID()
-		if i := strings.Index(ti.GetUserID(), " "); i > 0 {
-			// userID field from the token could contain encoded roles
-			// @todo investigate if role-encoding into user-id field is still needed?
-			userID = userID[:i]
-		}
+		var scope = strings.Split(ti.GetScope(), " ")
 
-		sessionUserExists := req.AuthUser != nil && req.AuthUser.User != nil
-
-		user, err = h.UserService.FindByAny(suCtx, userID)
+		// Here set roles to signed
+		signed, err = auth.TokenIssuer.Sign(
+			auth.WithAccessToken(ti.GetAccess()),
+			auth.WithIdentity(user),
+			func(tr *auth.TokenRequest) error {
+				// Calculate user's roles
+				roles := user.Roles()
+				if client.Security != nil {
+					roles = auth.ApplyRoleSecurity(
+						payload.ParseUint64s(client.Security.PermittedRoles),
+						payload.ParseUint64s(client.Security.ProhibitedRoles),
+						payload.ParseUint64s(client.Security.ForcedRoles),
+						roles...,
+					)
+				}
+				tr.Roles = roles
+				return nil
+			},
+			auth.WithClientID(client.ID),
+			auth.WithScope(scope...),
+		)
 
 		if err != nil {
-			if !errors.Is(err, systemService.UserErrNotFound()) {
-				return h.tokenError(w, fmt.Errorf("could not generate token: %v", err))
-			}
-
-			if errors.Is(err, systemService.UserErrNotFound()) && sessionUserExists {
-				user = req.AuthUser.User
-			}
+			return h.tokenError(w, err)
 		}
-
-		if sessionUserExists && req.AuthUser.User.ID == cast.ToUint64(userID) {
-			req.AuthUser.User = user
-			req.AuthUser.Save(req.Session)
-		}
-
-	default:
-		return fmt.Errorf("unsupported oauth2 grant type: %v", gt)
-	}
-
-	var (
-		signed []byte
-		scope  = strings.Split(ti.GetScope(), " ")
-	)
-
-	// Here set roles to signed
-	signed, err = auth.TokenIssuer.Sign(
-		auth.WithAccessToken(ti.GetAccess()),
-		auth.WithIdentity(user),
-		func(tr *auth.TokenRequest) error {
-			// Calculate user's roles
-			roles := user.Roles()
-			if client.Security != nil {
-				roles = auth.ApplyRoleSecurity(
-					payload.ParseUint64s(client.Security.PermittedRoles),
-					payload.ParseUint64s(client.Security.ProhibitedRoles),
-					payload.ParseUint64s(client.Security.ForcedRoles),
-					roles...,
-				)
-			}
-			tr.Roles = roles
-			return nil
-		},
-		auth.WithClientID(client.ID),
-		auth.WithScope(scope...),
-	)
-
-	if err != nil {
-		return h.tokenError(w, err)
 	}
 
 	// modify token info with signed JWT
@@ -478,14 +491,115 @@ func (h *AuthHandlers) handleTokenRequest(req *request.AuthReq, client *types.Au
 	// in case client is configured with "openid" scope,
 	// we'll add "id_token" with all required (by OIDC) details encoded
 	if strings.Contains(client.Scope, "openid") {
-		var idToken []byte
-		if idToken, err = generateIdToken(user, client, ti, h.Opt.BaseURL); err != nil {
-			return h.tokenError(w, err)
+		// for the authorization-code grant the id_token is generated
+		// inside the exchange's success boundary
+		if gt != oauth2def.AuthorizationCode {
+			if idToken, err = generateIdToken(user, client, ti, h.Opt.BaseURL); err != nil {
+				return h.tokenError(w, err)
+			}
 		}
+
 		response["id_token"] = string(idToken)
 	}
 
 	return writeResponse(w, response, nil)
+}
+
+// exchangeAuthorizationCode runs the hardened single-use authorization-code
+// exchange and performs user validation, JWT signing and OIDC id_token
+// generation before the code is claimed, so their failure never consumes the
+// code or leaves orphan credentials.
+//
+// Returned signed JWT and id_token are applied to the HTTP response AFTER the
+// exchange commits; response write failures can therefore never reopen the
+// retired code or invalidate the committed credentials.
+func (h *AuthHandlers) exchangeAuthorizationCode(
+	req *request.AuthReq,
+	client *types.AuthClient,
+	tgr *oauth2def.TokenGenerateRequest,
+) (
+	ti oauth2def.TokenInfo,
+	user *types.User,
+	signed []byte,
+	idToken []byte,
+	err error,
+) {
+	var (
+		ctx               = req.Context()
+		userID            string
+		sessionUserExists = req.AuthUser != nil && req.AuthUser.User != nil
+	)
+
+	ti, err = h.OAuth2.ExchangeAuthorizationCode(ctx, tgr, func(ctx context.Context, codeTI oauth2def.TokenInfo) error {
+		suCtx := auth.SetIdentityToContext(ctx, auth.ServiceUser())
+
+		userID = codeTI.GetUserID()
+		if i := strings.Index(userID, " "); i > 0 {
+			// userID field from the token could contain encoded roles
+			// @todo investigate if role-encoding into user-id field is still needed?
+			userID = userID[:i]
+		}
+
+		user, err = h.UserService.FindByAny(suCtx, userID)
+		if err != nil {
+			if !errors.Is(err, systemService.UserErrNotFound()) {
+				return fmt.Errorf("could not generate token: %v", err)
+			}
+
+			if sessionUserExists {
+				user = req.AuthUser.User
+				err = nil
+			}
+
+			return err
+		}
+
+		scope := strings.Split(codeTI.GetScope(), " ")
+
+		// Here set roles to signed
+		signed, err = auth.TokenIssuer.Sign(
+			auth.WithAccessToken(codeTI.GetAccess()),
+			auth.WithIdentity(user),
+			func(tr *auth.TokenRequest) error {
+				// Calculate user's roles
+				roles := user.Roles()
+				if client.Security != nil {
+					roles = auth.ApplyRoleSecurity(
+						payload.ParseUint64s(client.Security.PermittedRoles),
+						payload.ParseUint64s(client.Security.ProhibitedRoles),
+						payload.ParseUint64s(client.Security.ForcedRoles),
+						roles...,
+					)
+				}
+				tr.Roles = roles
+				return nil
+			},
+			auth.WithClientID(client.ID),
+			auth.WithScope(scope...),
+		)
+
+		if err != nil {
+			return err
+		}
+
+		if strings.Contains(client.Scope, "openid") {
+			idToken, err = generateIdToken(user, client, codeTI, h.Opt.BaseURL)
+		}
+
+		return err
+	})
+
+	if err != nil {
+		return
+	}
+
+	// session bookkeeping — performed only after the exchange commits
+	if sessionUserExists && req.AuthUser.User.ID == cast.ToUint64(userID) {
+		req.AuthUser.User = user
+		req.AuthUser.Save(req.Session)
+	}
+
+	return
 }
 
 func (h *AuthHandlers) tokenError(w http.ResponseWriter, err error) error {

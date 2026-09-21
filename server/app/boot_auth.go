@@ -32,8 +32,8 @@ func (app *CortezaApp) initAuth(ctx context.Context) (err error) {
 	app.oa2m = oauth2.NewManager(
 		app.Opt.Auth,
 		app.Log,
+		app.Store,
 		oauth2.NewClientStore(app.Store, app.DefaultAuthClient),
-		oauth2.NewTokenStore(app.Store),
 	)
 
 	// set base path for links&routes in auth server

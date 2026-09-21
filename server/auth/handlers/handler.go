@@ -16,6 +16,7 @@ import (
 
 	"github.com/cortezaproject/corteza/server/system/service"
 
+	cortezaoauth2 "github.com/cortezaproject/corteza/server/auth/oauth2"
 	"github.com/cortezaproject/corteza/server/auth/external"
 	"github.com/cortezaproject/corteza/server/auth/request"
 	"github.com/cortezaproject/corteza/server/auth/saml"
@@ -103,6 +104,7 @@ type (
 		ValidationTokenRequest(r *http.Request) (oauth2.GrantType, *oauth2.TokenGenerateRequest, error)
 		CheckGrantType(gt oauth2.GrantType) bool
 		GetAccessToken(ctx context.Context, gt oauth2.GrantType, tgr *oauth2.TokenGenerateRequest) (oauth2.TokenInfo, error)
+		ExchangeAuthorizationCode(ctx context.Context, tgr *oauth2.TokenGenerateRequest, issue cortezaoauth2.AuthorizationCodeIssueFn) (oauth2.TokenInfo, error)
 		GetTokenData(ti oauth2.TokenInfo) map[string]interface{}
 		HandleTokenRequest(w http.ResponseWriter, r *http.Request) error
 		GetErrorData(err error) (map[string]interface{}, int, http.Header)

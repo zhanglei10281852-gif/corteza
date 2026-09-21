@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 
+	cortezaoauth2 "github.com/cortezaproject/corteza/server/auth/oauth2"
 	"github.com/cortezaproject/corteza/server/auth/request"
 	"github.com/cortezaproject/corteza/server/auth/settings"
 	"github.com/cortezaproject/corteza/server/pkg/locale"
@@ -54,6 +55,7 @@ type (
 		validationTokenRequest     func(r *http.Request) (oauth2.GrantType, *oauth2.TokenGenerateRequest, error)
 		checkGrantType             func(gt oauth2.GrantType) bool
 		getAccessToken             func(ctx context.Context, gt oauth2.GrantType, tgr *oauth2.TokenGenerateRequest) (oauth2.TokenInfo, error)
+		exchangeAuthorizationCode  func(ctx context.Context, tgr *oauth2.TokenGenerateRequest, issue cortezaoauth2.AuthorizationCodeIssueFn) (oauth2.TokenInfo, error)
 		getTokenData               func(ti oauth2.TokenInfo) map[string]interface{}
 		handleTokenRequest         func(w http.ResponseWriter, r *http.Request) error
 		getErrorData               func(err error) (map[string]interface{}, int, http.Header)
@@ -252,6 +254,10 @@ func (s *oauth2ServiceMocked) CheckGrantType(gt oauth2.GrantType) bool {
 
 func (s *oauth2ServiceMocked) GetAccessToken(ctx context.Context, gt oauth2.GrantType, tgr *oauth2.TokenGenerateRequest) (oauth2.TokenInfo, error) {
 	return s.getAccessToken(ctx, gt, tgr)
+}
+
+func (s *oauth2ServiceMocked) ExchangeAuthorizationCode(ctx context.Context, tgr *oauth2.TokenGenerateRequest, issue cortezaoauth2.AuthorizationCodeIssueFn) (oauth2.TokenInfo, error) {
+	return s.exchangeAuthorizationCode(ctx, tgr, issue)
 }
 
 func (s *oauth2ServiceMocked) GetTokenData(ti oauth2.TokenInfo) map[string]interface{} {

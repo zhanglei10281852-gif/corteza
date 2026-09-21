@@ -71,7 +71,12 @@ func New(ctx context.Context, log *zap.Logger, oa2m oauth2def.Manager, s store.S
 
 	sesManager := request.NewSessionManager(s, opt, log)
 
-	oauth2Server := oauth2.NewServer(oa2m)
+	oa2mgr, isOauth2Manager := oa2m.(*oauth2.Manager)
+	if !isOauth2Manager {
+		return nil, fmt.Errorf("unsupported oauth2 manager implementation: %T", oa2m)
+	}
+
+	oauth2Server := oauth2.NewServer(oa2mgr)
 
 	// Called after oauth2 authorization request is validated
 	// We'll try to get valid user out of the session or redirect user to login page

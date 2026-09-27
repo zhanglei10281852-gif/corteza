@@ -166,7 +166,9 @@ func stepLinkFrames(ctx context.Context, iter dal.Iterator, r run) (ff []*Frame,
 		}
 		row.Reset()
 
-		_ = iter.Scan(row)
+		if err = iter.Scan(row); err != nil {
+			return
+		}
 
 		// Determine ref and which vars to use
 		aux, _ := row.GetValue(dal.LinkRefIdent, 0)
@@ -268,7 +270,9 @@ func stepFrames(ctx context.Context, iter dal.Iterator, r run) (ff []*Frame, err
 		}
 		row.Reset()
 
-		_ = iter.Scan(row)
+		if err = iter.Scan(row); err != nil {
+			return
+		}
 		builder.addRow(row)
 		counter++
 	}

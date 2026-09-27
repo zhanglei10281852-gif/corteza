@@ -2,13 +2,46 @@ package reporting
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/cortezaproject/corteza/server/pkg/dal"
+	"github.com/cortezaproject/corteza/server/pkg/filter"
 	"github.com/cortezaproject/corteza/server/pkg/ql"
 	"github.com/cortezaproject/corteza/server/system/types"
 	"github.com/stretchr/testify/require"
 )
+
+type scanErrorIterator struct {
+	dal.Iterator
+	err error
+}
+
+func (i scanErrorIterator) Scan(dal.ValueSetter) error { return i.err }
+
+func TestFramesPropagatesScanError(t *testing.T) {
+	ctx := context.Background()
+	buff := dal.InMemoryBuffer()
+	buff.Add(ctx, (&dal.Row{}).WithValue("id", 0, 1))
+	errScan := errors.New("scan boom")
+	r := run{
+		Pipeline: dal.Pipeline{&dal.Datasource{Ident: "l1"}},
+		Defs:     FrameDefinitionSet{{Name: "d1", Source: "l1"}},
+	}
+
+	_, err := Frames(ctx, scanErrorIterator{Iterator: buff, err: errScan}, r)
+	require.ErrorIs(t, err, errScan)
+}
+
+func (i scanErrorIterator) More(n uint, v dal.ValueGetter) error { return i.Iterator.More(n, v) }
+func (i scanErrorIterator) Err() error                           { return i.Iterator.Err() }
+func (i scanErrorIterator) Close() error                         { return i.Iterator.Close() }
+func (i scanErrorIterator) BackCursor(v dal.ValueGetter) (*filter.PagingCursor, error) {
+	return i.Iterator.BackCursor(v)
+}
+func (i scanErrorIterator) ForwardCursor(v dal.ValueGetter) (*filter.PagingCursor, error) {
+	return i.Iterator.ForwardCursor(v)
+}
 
 type (
 	mockModelFinder struct{}
